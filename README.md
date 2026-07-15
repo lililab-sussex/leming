@@ -39,7 +39,7 @@ Python 3.10 or higher is required.
 
 ## Example
 
-Here we apply the vEBM to structural MRI data from the Alzheimer's 
+Here we obtain a LEMING using structural MRI data from the Alzheimer's 
 Disease Neuroimaging Initiative (ADNI) dataset. It shows pixel-level 
 disease progression events in the brain, providing new fine-grained 
 insights into changes at the tissue-level caused by Alzheimer's disease.
