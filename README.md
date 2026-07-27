@@ -1,4 +1,4 @@
-# Latent Event Mapping (LEMING) ![LEMING](leming.png)
+# Latent Event Mapping (LEMING)
 
 LEMING is an interpretable disease progression modelling framework that leverages 
 variational permutation inference to enable rapid, low-compute inference of
@@ -27,15 +27,15 @@ pip install git+https://github.com/lililab-sussex/leming
 
 ### Dependencies
 
+Python 3.8 or higher is required.
+
 | Package      | Version     |
 |--------------|-------------|
-| numpy        | ==1.21      |
-| scipy        | ==1.7       |
-| scikit-learn | ==1.1       |
+| numpy        | ==1.24      |
+| scipy        | ==1.9       |
+| scikit-learn | ==1.3       |
 | torch        | ==2.2       |
-| matplotlib   | ==3.5       |
-
-Python 3.9 or higher is required.
+| matplotlib   | ==3.7       |
 
 ## Example
 
