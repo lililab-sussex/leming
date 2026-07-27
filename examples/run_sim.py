@@ -1,12 +1,12 @@
 # author: Peter Wijeratne (p.wijeratne@pm.me)
-# example VEBM training on simulated data
+# example LEMING training on simulated data
 import sys
 import numpy as np
 import pickle
 import matplotlib.pyplot as plt
 from pathlib import Path
 
-from vebm import VEBM
+from leming import LEMING
 from utils import gen_data
 
 try:
@@ -44,17 +44,17 @@ if __name__ == "__main__":
     
     # run model
     print("Variational inference for matching...")
-    model = VEBM(X=X0,
-                 labels=labels,
-                 n_sinkhorn=n_sinkhorn,
-                 temperature=temperature,
-                 temperature_prior=temperature_prior,
-                 gumbel_scale=gumbel_scale,
-                 n_mc_samples=n_mc_samples,
-                 n_iters=n_iters,
-                 step_size=step_size,
-                 use_em=True,
-                 verbose=True)
+    model = LEMING(X=X0,
+                   labels=labels,
+                   n_sinkhorn=n_sinkhorn,
+                   temperature=temperature,
+                   temperature_prior=temperature_prior,
+                   gumbel_scale=gumbel_scale,
+                   n_mc_samples=n_mc_samples,
+                   n_iters=n_iters,
+                   step_size=step_size,
+                   use_em=True,
+                   verbose=True)
     model.train()
     model.plot_sequence(seq_true=seq_true, verbose=True)
     plt.show()
