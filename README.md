@@ -1,4 +1,4 @@
-# Latent Event Mapping (LEMING)
+# Latent Event Mapping (LEMING) ![LEMING](leming.png)
 
 LEMING is an interpretable disease progression modelling framework that leverages 
 variational permutation inference to enable rapid, low-compute inference of
