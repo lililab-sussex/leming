@@ -29,13 +29,13 @@ pip install git+https://github.com/lililab-sussex/leming
 
 | Package      | Version     |
 |--------------|-------------|
-| numpy        | >=1.26, <2  |
-| scipy        | >=1.11      |
-| scikit-learn | >=1.3       |
-| torch        | >=2.2       |
-| matplotlib   | >=3.7       |
+| numpy        | ==1.21      |
+| scipy        | ==1.7       |
+| scikit-learn | ==1.1       |
+| torch        | ==2.2       |
+| matplotlib   | ==3.5       |
 
-Python 3.10 or higher is required.
+Python 3.9 or higher is required.
 
 ## Example
 
@@ -46,7 +46,7 @@ insights into changes at the tissue-level caused by Alzheimer's disease.
 	 
 Training this model took only 5 minutes on a single laptop CPU.
 
-![ADNI vEBM](adni_vebm.gif)
+![ADNI LEMING](adni_leming.gif)
 
 ## Contributors
 - Peter Wijeratne (p.wijeratne@sussex.ac.uk)
