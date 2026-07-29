@@ -313,6 +313,22 @@ class LEMING(BaseEstimator):
             P_hard[:,:,i] = P_i
         return P_hard
 
+    def get_sequence(self):
+        n_feat = self.X.shape[1]
+        log_mu_P = self.params[0]
+        # point estimate of sequence (zero Gumbel noise)
+        # add to \mu and scale
+        log_P = (log_mu_P) / self.temperature
+        # move \mu closer to Birkhoff polytope
+        log_P = self.sinkhorn_logspace(log_P, self.n_sinkhorn)
+        # note zero variance
+        P_sample = torch.exp(log_P)
+        P_sample = np.array([x.detach().cpu().numpy() for x in P_sample])
+        # round to permutation matrices
+        P_hard_sample = self.round_to_perm(P_sample[0])
+        S_point = np.einsum('i,ij->j', np.arange(n_feat), P_hard_sample)
+        return S_point
+
     def plot_sequence(self, seq_true=[], gumbel_scale=None, verbose=False):
         n_feat = self.X.shape[1]
         log_mu_P = self.params[0]
