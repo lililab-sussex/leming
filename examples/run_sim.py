@@ -19,7 +19,8 @@ if __name__ == "__main__":
     
     # model parameters
     n_sinkhorn = 20 # number of Sinkhorn-Knopp iterations
-    temperature = 1E0 # temperature hyperparameter
+    temperature_start = 1E1 # temperature hyperparameter - start value (for annealing)
+    temperature_end = 1E0 # temperature hyperparameter - end value
     temperature_prior = 1E0 # temperature prior hyperparameter
     gumbel_scale = 0 # Gumbel noise hyperparameter
     if gumbel_scale > 0:
@@ -40,14 +41,15 @@ if __name__ == "__main__":
     # labels is the control ("con") or case ("case") labels: shape (n_ppl)
     # seq_true is the true simulated sequence, used for post-hoc comparison: shape (n_fts+1)
     X, _, _, labels, X0, _, _, seq_true, _, _, _ = gen_data(n_ppl, n_fts, n_obs, sigma_noise)
-    print ('n_ppl {} n_fts {} n_iters {} step_size {} n_sinkhorn {} temperature {} temperature_prior {} gumbel_scale {} n_mc_samples {} sigma_noise {}'.format(n_ppl, n_fts, n_iters, step_size, n_sinkhorn, temperature, temperature_prior, gumbel_scale, n_mc_samples, sigma_noise))
+    print ('n_ppl {} n_fts {} n_iters {} step_size {} n_sinkhorn {} temperature_start {} temperature_end {} temperature_prior {} gumbel_scale {} n_mc_samples {} sigma_noise {}'.format(n_ppl, n_fts, n_iters, step_size, n_sinkhorn, temperature_start, temperature_end, temperature_prior, gumbel_scale, n_mc_samples, sigma_noise))
     
     # run model
     print("Variational inference for matching...")
     model = LEMING(X=X0,
                    labels=labels,
                    n_sinkhorn=n_sinkhorn,
-                   temperature=temperature,
+                   temperature_start=temperature_start,
+                   temperature_end=temperature_end,
                    temperature_prior=temperature_prior,
                    gumbel_scale=gumbel_scale,
                    n_mc_samples=n_mc_samples,

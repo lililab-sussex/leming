@@ -18,7 +18,8 @@ class LEMING(BaseEstimator):
                  labels=None,
                  S_prior=None,
                  n_sinkhorn=20,
-                 temperature=1E0,
+                 temperature_start=1E1,
+                 temperature_end=1E0,
                  temperature_prior=1E0,
                  gumbel_scale=0,
                  n_mc_samples=20,
@@ -33,7 +34,8 @@ class LEMING(BaseEstimator):
         self.labels = labels
         self.S_prior = S_prior
         self.n_sinkhorn = n_sinkhorn
-        self.temperature = temperature
+        self.temperature_start = temperature_start
+        self.temperature_end = temperature_end
         self.temperature_prior = temperature_prior
         self.gumbel_scale = gumbel_scale
         self.n_mc_samples = n_mc_samples
@@ -150,13 +152,13 @@ class LEMING(BaseEstimator):
     def vectorised_sample_gumbel(self, P, n=1):
         return -torch.log(-torch.log(torch.rand((P[0], P[1], n)) + self.eps) + self.eps)
 
-    def gumbel_distance(self, log_mu_P):
+    def gumbel_distance(self, log_mu_P, temperature=1E0):
         # from https://arxiv.org/abs/1802.08665 Supplementary Section B.3
         # note the seemingly magic number comes from the Gumbel distribution expectation (which is equal to the Euler-Mascheroni constant: https://en.wikipedia.org/wiki/Euler%27s_constant)
-        arr = torch.sum(np.log(self.temperature_prior) - 0.5772156649 * self.temperature_prior / self.temperature -
-                        log_mu_P * self.temperature_prior / self.temperature -
-                        torch.exp(gammaln(1 + self.temperature_prior / self.temperature) - log_mu_P * self.temperature_prior / self.temperature)
-                        - (np.log(self.temperature) - 1 - 0.5772156649))
+        arr = torch.sum(np.log(self.temperature_prior) - 0.5772156649 * self.temperature_prior / temperature -
+                        log_mu_P * self.temperature_prior / temperature -
+                        torch.exp(gammaln(1 + self.temperature_prior / temperature) - log_mu_P * self.temperature_prior / temperature)
+                        - (np.log(temperature) - 1 - 0.5772156649))
         return arr
     """
     #FIXME: not currently used in ELBO
@@ -169,14 +171,14 @@ class LEMING(BaseEstimator):
             - 0.5 * N**2 * np.log(2 * np.pi) \
             - 0.5 * N**2 * np.log(self.sigmasq_prior)
     """
-    def variational_objective(self, return_dr=False):
+    def variational_objective(self, temperature, return_dr=False):
         log_mu_P = self.params[0]
         # vectorise \mu for number of MC samples
         log_mu_P_rep = log_mu_P.unsqueeze(2).repeat(1, 1, self.n_mc_samples)
         # sample Gumbel noise
         gumbel_noise = self.to_var(self.vectorised_sample_gumbel(log_mu_P.shape, self.n_mc_samples))
         # add to \mu and scale
-        log_P = (log_mu_P_rep + gumbel_noise * self.gumbel_scale) / self.temperature
+        log_P = (log_mu_P_rep + gumbel_noise * self.gumbel_scale) / temperature
         # move \mu closer to Birkhoff polytope
         log_P = self.vectorised_sinkhorn_logspace(log_P, self.n_sinkhorn)
         # note zero variance
@@ -184,7 +186,7 @@ class LEMING(BaseEstimator):
         # observation likelihood
         distortion = self.to_var(self.vectorised_log_likelihood_ebm_logspace(P) / self.n_mc_samples)
         # KL divergence
-        rate = self.to_var(self.gumbel_distance(log_mu_P))
+        rate = self.to_var(self.gumbel_distance(log_mu_P, temperature))
         # FIXME: entropy term for \mu?
         if return_dr:
             return -(distortion + rate), distortion, rate
@@ -195,20 +197,22 @@ class LEMING(BaseEstimator):
         self.fit_gmms(self.X, self.labels)
         self.calc_prob_mat(self.X)
         optimizer = torch.optim.Adam(self.params, lr=self.step_size, eps=self.eps)
-        for i in range(self.n_iters):
+        gamma = (self.temperature_end / self.temperature_start) ** (1 / self.n_iters)        
+        for step in range(self.n_iters):
             optimizer.zero_grad()
-            loss = self.variational_objective()
+            temp = self.temperature_start * (gamma ** step)
+            loss = self.variational_objective(max(self.temperature_end, temp))
             if self.verbose:
-                print (loss)
+                print (step, loss, temp)
             loss.backward()
             optimizer.step()
 
-    def predict_stage(self, X, hard_perm=True):
+    def predict_stage(self, X, temperature=1E0, hard_perm=True):
         self.calc_prob_mat(X)
         log_mu_P = self.params[0]
         # point estimate of sequence (zero Gumbel noise)
         # add to \mu and scale
-        log_P = (log_mu_P) / self.temperature
+        log_P = (log_mu_P) / temperature
         # move \mu closer to Birkhoff polytope
         log_P = self.sinkhorn_logspace(log_P, self.n_sinkhorn)
         # note zero variance
@@ -313,12 +317,12 @@ class LEMING(BaseEstimator):
             P_hard[:,:,i] = P_i
         return P_hard
 
-    def get_sequence(self):
+    def get_sequence(self, temperature=1E0):
         n_feat = self.X.shape[1]
         log_mu_P = self.params[0]
         # point estimate of sequence (zero Gumbel noise)
         # add to \mu and scale
-        log_P = (log_mu_P) / self.temperature
+        log_P = (log_mu_P) / temperature
         # move \mu closer to Birkhoff polytope
         log_P = self.sinkhorn_logspace(log_P, self.n_sinkhorn)
         # note zero variance
@@ -329,12 +333,12 @@ class LEMING(BaseEstimator):
         S_point = np.einsum('i,ij->j', np.arange(n_feat), P_hard_sample)
         return S_point
 
-    def plot_sequence(self, seq_true=[], gumbel_scale=None, verbose=False):
+    def plot_sequence(self, temperature=1E0, seq_true=[], gumbel_scale=None, verbose=False):
         n_feat = self.X.shape[1]
         log_mu_P = self.params[0]
         # point estimate of sequence (zero Gumbel noise)
         # add to \mu and scale
-        log_P = (log_mu_P) / self.temperature
+        log_P = (log_mu_P) / temperature
         # move \mu closer to Birkhoff polytope
         log_P = self.sinkhorn_logspace(log_P, self.n_sinkhorn)
         # note zero variance
@@ -357,7 +361,7 @@ class LEMING(BaseEstimator):
             # sample Gumbel noise
             gumbel_noise = self.to_var(self.sample_gumbel(log_mu_P.shape)[0])
             # add to \mu and scale
-            log_P = (log_mu_P + gumbel_noise * gumbel_scale) / self.temperature
+            log_P = (log_mu_P + gumbel_noise * gumbel_scale) / temperature
             # move \mu closer to Birkhoff polytope
             log_P = self.sinkhorn_logspace(log_P, self.n_sinkhorn)
             # note zero variance
