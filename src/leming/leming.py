@@ -1,4 +1,4 @@
-# author: Peter Wijeratne (p.wijeratne@pm.me)
+# Author: Peter Wijeratne (p.wijeratne@sussex.ac.uk)
 # LEMING class
 import numpy as np
 import scipy as sp
@@ -10,6 +10,39 @@ from torch import logsumexp
 import matplotlib.pyplot as plt
 from pathlib import Path
 import pickle
+from joblib import Parallel, delayed, cpu_count
+from torch.utils.checkpoint import checkpoint
+
+def _fit_gmm_em_feature(X_i, y):
+    y_i = y[~np.isnan(X_i)]
+    X_i = X_i[~np.isnan(X_i)]
+    mm = gmm(n_components=2, covariance_type='diag', tol=1E-3, n_init=100,
+             means_init=np.array([np.nanmean(X_i[y_i == 0]), np.nanmean(X_i[y_i == 1])]).reshape(2, 1),
+             precisions_init=np.array([1 / np.nanstd(X_i[y_i == 0]) ** 2, 1 / np.nanstd(X_i[y_i == 1]) ** 2]).reshape(2, 1),
+             weights_init=np.array([0.5, 0.5]))
+    mm.fit(X_i[(y_i == 0).astype(bool) + (y_i == 1).astype(bool)].reshape(-1, 1))
+    return [mm.means_[0][0], np.sqrt(mm.covariances_[0][0]),
+            mm.means_[1][0], np.sqrt(mm.covariances_[1][0]),
+            mm.weights_[0]]
+
+def _gmm_like(theta, X, y):
+    pdf_0 = sp.stats.norm.pdf(X[y == 0], loc=theta[0], scale=theta[1]) * theta[4]
+    pdf_1 = sp.stats.norm.pdf(X[y == 1], loc=theta[2], scale=theta[3]) * (1 - theta[4])
+    pdf_0[np.isnan(pdf_0)] = .5
+    pdf_1[np.isnan(pdf_1)] = .5
+    like = np.concatenate((pdf_0, pdf_1))
+    like[like == 0] = np.finfo(float).eps
+    if np.sum(np.isnan(like)) > 0 or np.sum(np.isinf(like)) > 0:
+        raise ValueError("NaN or inf encountered in GMM likelihood")
+    return -1 * np.sum(np.log(like))
+ 
+def _fit_gmm_optim_feature(X_i, y):
+    y_i = y[~np.isnan(X_i)]
+    X_i = X_i[~np.isnan(X_i)]
+    theta_0 = [np.nanmean(X_i[y_i == 0]), np.nanstd(X_i[y_i == 0]),
+               np.nanmean(X_i[y_i == 1]), np.nanstd(X_i[y_i == 1]), 0.5]
+    fit = sp.optimize.minimize(_gmm_like, theta_0, args=(X_i, y_i), method='SLSQP')
+    return fit.x
 
 class LEMING(BaseEstimator):
 
@@ -25,7 +58,7 @@ class LEMING(BaseEstimator):
                  n_mc_samples=20,
                  n_iters=100,
                  step_size=1E-1,
-                 sigmasq_prior=1.0,
+                 #                 sigmasq_prior=1.0,
                  use_em=True,
                  verbose=False):
         
@@ -42,33 +75,55 @@ class LEMING(BaseEstimator):
         self.n_iters = n_iters
         self.step_size = step_size
         self.use_em = use_em
-        #FIXME: not currently used in ELBO
+        #FIXME: not currently used
         #        self.sigmasq_prior = sigmasq_prior
         self.verbose = verbose
         
         # automatically-defined variables
+        self.dtype = torch.float32
         self.is_cuda = torch.cuda.is_available()
         if self.is_cuda:
             self.device = 'cuda'
-            self.dtype = torch.float32
         else:
             self.device = 'cpu'
-            self.dtype = torch.float64
         torch.set_default_dtype(self.dtype)
         self.eps = torch.finfo(self.dtype).eps
-        #FIXME: assume a uniform prior on P?
+        # assume a uniform prior on P
         self.params = [self.to_var(torch.zeros((self.X.shape[1], self.X.shape[1]), requires_grad=True, device=self.device))]
+        self.loss_trace = []
         
     def to_var(self, x):
         if self.is_cuda:
             x = x.cuda()
         return x
+    
+    def fit_gmms(self, X, y, n_jobs=-1):
+        if self.use_em:
+            results = Parallel(n_jobs=n_jobs)(
+                delayed(_fit_gmm_em_feature)(X[:, i], y) for i in range(X.shape[1])
+            )
+        else:
+            results = Parallel(n_jobs=n_jobs)(
+                delayed(_fit_gmm_optim_feature)(X[:, i], y) for i in range(X.shape[1])
+            )
+        self.thetas = results
+    
+    def calc_prob_mat(self, X):
+        prob_mat = np.zeros((X.shape[0], X.shape[1], 2))
+        for i in range(X.shape[1]):
+            pdf_0 = sp.stats.norm.pdf(X[:,i], loc=self.thetas[i][0], scale=self.thetas[i][1])
+            pdf_1 = sp.stats.norm.pdf(X[:,i], loc=self.thetas[i][2], scale=self.thetas[i][3])
+            pdf_0[np.isnan(pdf_0)] = 0.5
+            pdf_1[np.isnan(pdf_1)] = 0.5
+            prob_mat[:, i, 0] = pdf_0.flatten()
+            prob_mat[:, i, 1] = pdf_1.flatten()
+        self.prob_mat = self.to_var(torch.tensor(prob_mat, dtype=self.dtype))
 
     def vectorised_log_likelihood_ebm_logspace(self, P):
         k = self.prob_mat.shape[1]+1
         # note we omit the uniform prior over k
         #        logp_k = torch.log(torch.tensor(1/k))
-        logp_perm_k = torch.zeros((self.prob_mat.shape[0], k, P.shape[2]))
+        logp_perm_k = torch.zeros((self.prob_mat.shape[0], k, P.shape[2]), device=self.device)
         p_yes = torch.einsum('ij,jkl->ikl', self.prob_mat[:, :, 1], P)
         p_yes[p_yes == 0] = self.eps
         p_no = torch.einsum('ij,jkl->ikl', self.prob_mat[:, :, 0], torch.flip(P, [1]))
@@ -83,53 +138,6 @@ class LEMING(BaseEstimator):
         logp_perm = logsumexp(logp_perm_k, axis=1)
         return torch.sum(logp_perm)
 
-    def fit_gmms(self, X, y):
-        thetas = []
-        if self.use_em:
-            for i in range(X.shape[1]):
-                y_i = y[~np.isnan(X[:, i])]
-                X_i = X[~np.isnan(X[:, i]), i]
-                mm = gmm(n_components=2, covariance_type='diag', tol=1E-3, n_init=100,
-                         means_init=np.array([np.nanmean(X_i[y_i==0]), np.nanmean(X_i[y_i==1])]).reshape(2,1),
-                         precisions_init=np.array([1/np.nanstd(X_i[y_i==0])**2, 1/np.nanstd(X_i[y_i==1])**2]).reshape(2,1),
-                         weights_init=np.array([0.5,0.5]))
-                mm.fit(X_i[(y_i == 0).astype(bool) + (y_i == 1).astype(bool)].reshape(-1, 1))
-                thetas.append([mm.means_[0][0], np.sqrt(mm.covariances_[0][0]),
-                               mm.means_[1][0], np.sqrt(mm.covariances_[1][0]),
-                               mm.weights_[0]])
-        else:
-            def gmm_like(theta, X, y):
-                pdf_0 = sp.stats.norm.pdf(X[y==0], loc=theta[0], scale=theta[1]) * theta[4]
-                pdf_1 = sp.stats.norm.pdf(X[y==1], loc=theta[2], scale=theta[3]) * (1-theta[4])
-                pdf_0[np.isnan(pdf_0)] = .5
-                pdf_1[np.isnan(pdf_1)] = .5
-                like = np.concatenate((pdf_0, pdf_1))
-                like[like == 0] = np.finfo(float).eps
-                if np.sum(np.isnan(like))>0 or np.sum(np.isinf(like))>0:
-                    quit()
-                return -1*np.sum(np.log(like))
-            for i in range(X.shape[1]):
-                y_i = y[~np.isnan(X[:, i])]
-                X_i = X[~np.isnan(X[:, i]), i]
-                theta_0 = [np.nanmean(X_i[y_i==0]), np.nanstd(X_i[y_i==0]), np.nanmean(X_i[y_i==1]), np.nanstd(X_i[y_i==1]), 0.5]
-                fit = sp.optimize.minimize(gmm_like,
-                                           theta_0,
-                                           args=(X_i, y_i),
-                                           method='SLSQP')
-                thetas.append(fit.x)
-        self.thetas = thetas
-
-    def calc_prob_mat(self, X):
-        prob_mat = np.zeros((X.shape[0], X.shape[1], 2))
-        for i in range(X.shape[1]):
-            pdf_0 = sp.stats.norm.pdf(X[:,i], loc=self.thetas[i][0], scale=self.thetas[i][1])
-            pdf_1 = sp.stats.norm.pdf(X[:,i], loc=self.thetas[i][2], scale=self.thetas[i][3])
-            pdf_0[np.isnan(pdf_0)] = 0.5
-            pdf_1[np.isnan(pdf_1)] = 0.5
-            prob_mat[:, i, 0] = pdf_0.flatten()
-            prob_mat[:, i, 1] = pdf_1.flatten()
-        self.prob_mat = self.to_var(torch.tensor(prob_mat, dtype=self.dtype))
-
     def sinkhorn_logspace(self, logP, n_iters=10):
         n = logP.size()[1]
         logP = logP.view(-1, n, n)
@@ -137,13 +145,17 @@ class LEMING(BaseEstimator):
             logP = logP - (logsumexp(logP, dim=2, keepdim=True)).view(-1, n, 1)
             logP = logP - (logsumexp(logP, dim=1, keepdim=True)).view(-1, 1, n)
         return logP
-    
+
     def vectorised_sinkhorn_logspace(self, logP, n_iters=10):
         n = logP.size()[1]
         logP = logP.view(n, n, -1)
+        def sinkhorn_step(logP):
+            logP = logP - logsumexp(logP, dim=1, keepdim=True).view(n, 1, -1)
+            logP = logP - logsumexp(logP, dim=0, keepdim=True).view(1, n, -1)
+            return logP
+        # do this to reduce memory load when running multiple MC samples
         for i in range(n_iters):
-            logP = logP - (logsumexp(logP, dim=1, keepdim=True)).view(n, 1, -1)
-            logP = logP - (logsumexp(logP, dim=0, keepdim=True)).view(1, n, -1)
+            logP = checkpoint(sinkhorn_step, logP, use_reentrant=False)
         return logP
 
     def sample_gumbel(self, P, n=1):
@@ -202,6 +214,7 @@ class LEMING(BaseEstimator):
             optimizer.zero_grad()
             temp = self.temperature_start * (gamma ** step)
             loss = self.variational_objective(max(self.temperature_end, temp))
+            self.loss_trace.append(loss)
             if self.verbose:
                 print (step, loss, temp)
             loss.backward()
@@ -218,77 +231,29 @@ class LEMING(BaseEstimator):
         # note zero variance
         P_soft = torch.exp(log_P)
         k = self.prob_mat.shape[1]+1
+        prob_mat_np = self.prob_mat.detach().cpu().numpy()
         if hard_perm:
             # round to permutation matrices
             P_soft = P_soft.detach().cpu().numpy()
             P_hard = self.round_to_perm(P_soft[0])
-            S_hard = np.einsum('i,ij->j', np.arange(X.shape[1]), P_hard)
-            p_yes = np.array(self.prob_mat[:, S_hard, 1])
+            S_hard = np.einsum('i,ij->j', np.arange(X.shape[1]), P_hard).astype(int)
+            p_yes = np.array(prob_mat_np[:, S_hard, 1])
             p_yes[p_yes == 0] = self.eps
-            p_no = np.array(self.prob_mat[:, S_hard, 0])
+            p_no = np.array(prob_mat_np[:, S_hard, 0])
             p_no[p_no == 0] = self.eps
             logp_yes = np.log(p_yes)
             logp_no = np.log(p_no)
             logcp_yes = np.cumsum(logp_yes, axis=1)
             logcp_no = np.cumsum(logp_no, axis=1)
-            logp_perm_k = np.zeros((self.prob_mat.shape[0], k))
+            logp_perm_k = np.zeros((prob_mat_np.shape[0], k))
             logp_perm_k[:, 0] = logcp_no[:, -1]
             logp_perm_k[:, 1:-1] = np.flip(logcp_no[:, :-1], [1]) + logcp_yes[:, :-1]
             logp_perm_k[:, -1] = logcp_yes[:, -1]
-            #            p_perm_k = np.exp(logp_perm_k)/np.sum(np.exp(logp_perm_k), axis=1).reshape(logp_perm_k.shape[0], 1)
         else:
-            #FIXME
-            print ('Not implemented')
-            quit()
-            p_yes = torch.einsum('ij,jkl->ikl', self.prob_mat[:, :, 1], P_soft)
-            p_yes[p_yes == 0] = self.eps
-            p_no = torch.einsum('ij,jkl->ikl', self.prob_mat[:, :, 0], torch.flip(P_soft, [1]))
-            p_no[p_no == 0] = self.eps
-            p_yes = p_yes.detach().numpy()
-            p_no = p_no.detach().numpy()
-            logp_yes = np.log(p_yes)
-            logp_no = np.log(p_no)
-            logcp_yes = np.cumsum(logp_yes, axis=1)
-            logcp_no = np.cumsum(logp_no, axis=1)
-            logp_perm_k = np.zeros((self.prob_mat.shape[0], k, P_soft.shape[2]))
-            logp_perm_k[:, 0, :] = logcp_no[:, -1, :]
-            logp_perm_k[:, 1:-1, :] = np.flip(logcp_no[:, :-1, :], [1]) + logcp_yes[:, :-1, :]
-            logp_perm_k[:, -1, :] = logcp_yes[:, -1, :]
-            logp_perm = logsumexp(logp_perm_k, axis=1)
-            # print (logp_perm_k.shape) (n_ppl, n_events, P_soft.shape[0]*P_soft.shape[1])
-        #
+            #FIXME: implement soft staging and/or eigendecomposition instead of ML
+            raise ValueError('Not implemented')
         stages = np.argmax(logp_perm_k, axis=1)
-        """
-        stages = np.zeros(p_perm_k.shape[0])
-        for i in range(p_perm_k.shape[0]):
-            stages[i] = np.mean(p_perm_k[i] * np.arange(1,k+1)) * (k-1) - 1
-        """
-        return stages, logp_perm_k
-        """
-        # note we omit the uniform prior over k
-        #        logp_k = torch.log(torch.tensor(1/k))
-        logp_perm_k = torch.zeros((self.prob_mat.shape[0], k, P_soft.shape[2]))
-        p_yes = torch.einsum('ij,jkl->ikl', self.prob_mat[:, :, 1], P_soft)
-        p_yes[p_yes == 0] = self.eps
-        p_no = torch.einsum('ij,jkl->ikl', self.prob_mat[:, :, 0], torch.flip(P_soft, [1]))
-        p_no[p_no == 0] = self.eps
-        logp_yes = np.log(p_yes.detach().cpu().numpy())
-        logp_no = np.log(p_no.detach().cpu().numpy())
-
-        logp_yes_vec = np.zeros((logp_yes.shape[0], logp_yes.shape[1]))
-        logp_no_vec = np.zeros((logp_no.shape[0], logp_no.shape[1]))
-        for i in range(logp_yes_vec.shape[0]):
-            val_yes_i, vec_yes_i = np.linalg.eig(logp_yes[i])
-            logp_yes_vec[i] = val_yes_i
-            val_no_i, vec_no_i = np.linalg.eig(logp_no[i])
-            logp_no_vec[i] = val_no_i
-            
-        stage_likes = np.zeros((X.shape[0], k))
-        for i in range(k):
-            stage_likes[:, i] = np.nanprod(logp_yes_vec[:, :i], 1)*np.nanprod(logp_no_vec[:, i:X.shape[1]], 1)
-        stages = np.argmax(stage_likes, axis=1)
-        """
-        return stages, stage_likes
+        return stages
 
     def perm_to_P(self, perm):
         K = len(perm)
@@ -299,10 +264,7 @@ class LEMING(BaseEstimator):
     def round_to_perm(self, P):
         N = P.shape[0]
         assert P.shape == (N, N)
-        try:
-            row, col = sp.optimize.linear_sum_assignment(-P)
-        except:
-            col = linear_sum_assignment_wrapper(-P)
+        row, col = sp.optimize.linear_sum_assignment(-P)
         P = np.zeros((N, N))
         P[np.arange(N), col] = 1.0
         return P
@@ -317,51 +279,34 @@ class LEMING(BaseEstimator):
             P_hard[:,:,i] = P_i
         return P_hard
 
-    def get_sequence(self, temperature=1E0):
+    def get_sequence(self, temperature=1E0, n_samples=0):
         n_feat = self.X.shape[1]
         log_mu_P = self.params[0]
-        # point estimate of sequence (zero Gumbel noise)
-        # add to \mu and scale
-        log_P = (log_mu_P) / temperature
-        # move \mu closer to Birkhoff polytope
-        log_P = self.sinkhorn_logspace(log_P, self.n_sinkhorn)
-        # note zero variance
-        P_sample = torch.exp(log_P)
-        P_sample = np.array([x.detach().cpu().numpy() for x in P_sample])
-        # round to permutation matrices
-        P_hard_sample = self.round_to_perm(P_sample[0])
-        S_point = np.einsum('i,ij->j', np.arange(n_feat), P_hard_sample)
-        return S_point
-
-    def plot_sequence(self, temperature=1E0, seq_true=[], gumbel_scale=None, verbose=False):
-        n_feat = self.X.shape[1]
-        log_mu_P = self.params[0]
-        # point estimate of sequence (zero Gumbel noise)
-        # add to \mu and scale
-        log_P = (log_mu_P) / temperature
-        # move \mu closer to Birkhoff polytope
-        log_P = self.sinkhorn_logspace(log_P, self.n_sinkhorn)
-        # note zero variance
-        P_sample = torch.exp(log_P)
-        P_sample = np.array([x.detach().cpu().numpy() for x in P_sample])
-        # round to permutation matrices
-        P_hard_sample = self.round_to_perm(P_sample[0])
-        S_point = np.einsum('i,ij->j', np.arange(n_feat), P_hard_sample)
-
-        # distribution of sequences (non-zero Gumbel noise)
-        if not gumbel_scale:
-            gumbel_scale = self.gumbel_scale
-        if gumbel_scale > 0:
-            n_samples = 1000
+        if n_samples>0:
+            # distribution of sequences (non-zero Gumbel noise)
+            S_samples = []
+            # note that we don't vectorise here for memory reasons; but we could
+            for i in range(n_samples):
+                # sample Gumbel noise
+                gumbel_noise = self.to_var(self.sample_gumbel(log_mu_P.shape)[0])
+                # add to \mu and scale
+                log_P = (log_mu_P + gumbel_noise * self.gumbel_scale) / temperature
+                # move \mu closer to Birkhoff polytope
+                log_P = self.sinkhorn_logspace(log_P, self.n_sinkhorn)
+                # note zero variance
+                P_sample = torch.exp(log_P)
+                P_sample = np.array([x.detach().cpu().numpy() for x in P_sample])
+                # round to permutation matrices
+                P_hard_sample = self.round_to_perm(P_sample[0])
+                # sequences
+                S_samples.append(np.einsum('i,ij->j', np.arange(n_feat), P_hard_sample))        
+            S_unique, counts = np.unique(S_samples, axis=0, return_counts=True)
+            S_mode = S_unique[np.argmax(counts)].astype(int)
+            return S_mode, S_samples
         else:
-            n_samples = 1
-        S_samples = []
-        # note that we don't vectorise here for memory reasons; but we could
-        for i in range(n_samples):
-            # sample Gumbel noise
-            gumbel_noise = self.to_var(self.sample_gumbel(log_mu_P.shape)[0])
+            # point estimate of sequence (zero Gumbel noise)
             # add to \mu and scale
-            log_P = (log_mu_P + gumbel_noise * gumbel_scale) / temperature
+            log_P = (log_mu_P) / temperature
             # move \mu closer to Birkhoff polytope
             log_P = self.sinkhorn_logspace(log_P, self.n_sinkhorn)
             # note zero variance
@@ -369,35 +314,34 @@ class LEMING(BaseEstimator):
             P_sample = np.array([x.detach().cpu().numpy() for x in P_sample])
             # round to permutation matrices
             P_hard_sample = self.round_to_perm(P_sample[0])
-            # sequences
-            S_samples.append(np.einsum('i,ij->j', np.arange(n_feat), P_hard_sample))        
-        S_unique, counts = np.unique(S_samples, axis=0, return_counts=True)
-        S_mode = S_unique[np.argmax(counts)].astype(int)
-    
+            S_point = np.einsum('i,ij->j', np.arange(n_feat), P_hard_sample)
+            return S_point, np.array([])
+
+    def plot_sequence(self, S, S_samples, temperature=1E0, seq_true=[], verbose=False):        
         confusion_mat = np.zeros((n_feat, n_feat))
         pcorr_vi, ncorr_vi = 0., 0
         for i in range(n_feat):
-            confusion_mat[i, :] = np.sum(S_samples == S_point[i], axis=0)
+            confusion_mat[i, :] = np.sum(S_samples == S[i], axis=0)
             if len(seq_true)>0:
                 pcorr_vi += np.sum(S_samples == seq_true[i], axis=0)[i]/np.sum(S_samples == seq_true[i])
                 ncorr_vi += 1
         if len(seq_true)>0:
-            kt_vi = sp.stats.kendalltau(seq_true.astype(int), S_point)
-            fcorr_vi = np.sum(S_point==seq_true)/n_feat
+            kt_vi = sp.stats.kendalltau(seq_true.astype(int), S)
+            fcorr_vi = np.sum(S==seq_true)/n_feat
             if ncorr_vi > 0:
                 pcorr_vi /= ncorr_vi
             else:
                 pcorr_vi = np.nan
             if verbose and len(seq_true)>0:
-                print ('S_true, S_vi, kt_vi', seq_true.astype(int), S_point, kt_vi)
-                print ('frac_correct', np.sum(S_point==seq_true)/n_feat, ' chance ', 1/n_feat)
+                print ('S_true, S_vi, kt_vi', seq_true.astype(int), S, kt_vi)
+                print ('frac_correct', np.sum(S==seq_true)/n_feat, ' chance ', 1/n_feat)
                 print ('pcorr_vi', pcorr_vi)
         fig, ax = plt.subplots(figsize=(8, 6))
         ax.imshow(confusion_mat, interpolation='nearest', cmap='gray_r', label='Reco')
         ax.set_xticks(np.arange(n_feat))
         ax.set_yticks(np.arange(n_feat))
         ax.set_xticklabels(np.arange(n_feat), fontsize=20)
-        ax.set_yticklabels(np.arange(n_feat)[S_mode], fontsize=20)
+        ax.set_yticklabels(np.arange(n_feat)[S], fontsize=20)
         if n_feat >= 50 and n_feat < 500:
             [l.set_visible(False) for (i,l) in enumerate(ax.xaxis.get_major_ticks()) if i % 10 != 0]
             [l.set_visible(False) for (i,l) in enumerate(ax.yaxis.get_major_ticks()) if i % 10 != 0]
@@ -413,12 +357,12 @@ class LEMING(BaseEstimator):
         if len(seq_true)>0:
             for i in range(n_feat):
                 if i==0:
-                    rect = plt.Rectangle((i-.5, np.where(S_mode[i]==seq_true)[0][0]-.5), 1, 1, fill=True, color='black', linewidth=2, label='Reco')
+                    rect = plt.Rectangle((i-.5, np.where(S[i]==seq_true)[0][0]-.5), 1, 1, fill=True, color='black', linewidth=2, label='Reco')
                     ax.add_patch(rect)
-                    rect = plt.Rectangle((i-.5, np.where(S_mode[i]==seq_true)[0][0]-.5), 1, 1, fill=False, color='red', linewidth=2, label='True')
+                    rect = plt.Rectangle((i-.5, np.where(S[i]==seq_true)[0][0]-.5), 1, 1, fill=False, color='red', linewidth=2, label='True')
                     ax.add_patch(rect)
                 else:
-                    rect = plt.Rectangle((i-.5, np.where(S_mode[i]==seq_true)[0][0]-.5), 1, 1, fill=False, color='red', linewidth=2)
+                    rect = plt.Rectangle((i-.5, np.where(S[i]==seq_true)[0][0]-.5), 1, 1, fill=False, color='red', linewidth=2)
                     ax.add_patch(rect)
             ax.legend(fontsize=20)
         plt.subplots_adjust(bottom=0.15, top=0.95)
@@ -452,13 +396,13 @@ class LEMING(BaseEstimator):
             ax.flat[i].set_title(score_names[i])
             ax.flat[i].axes.get_yaxis().set_visible(False)
 
-
     def write(self, path='model.pkl'):
         file_out = Path(path)
         pickle_file = open(file_out, 'wb')
         data = {}
         data['params'] = self.params
         data['thetas'] = self.thetas
+        data['loss'] = self.loss_trace
         pickle.dump(data, pickle_file)
         pickle_file.close()
     
@@ -468,5 +412,6 @@ class LEMING(BaseEstimator):
         data = pickle.load(pickle_file)
         self.params = data['params']
         self.thetas = data['thetas']
+        self.loss_trace = data['loss']
         pickle_file.close()
         self.calc_prob_mat(self.X)
