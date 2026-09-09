@@ -317,7 +317,8 @@ class LEMING(BaseEstimator):
             S_point = np.einsum('i,ij->j', np.arange(n_feat), P_hard_sample)
             return S_point, np.array([])
 
-    def plot_sequence(self, S, S_samples, temperature=1E0, seq_true=[], verbose=False):        
+    def plot_sequence(self, S, S_samples, temperature=1E0, seq_true=[], verbose=False):
+        n_feat = len(S)
         confusion_mat = np.zeros((n_feat, n_feat))
         pcorr_vi, ncorr_vi = 0., 0
         for i in range(n_feat):

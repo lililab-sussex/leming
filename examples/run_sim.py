@@ -34,7 +34,7 @@ if __name__ == "__main__":
     n_ppl = 100 # number of individuals
     n_fts = 10 # number of features
     n_obs = 1 # number of observations per individual
-    sigma_noise = 1.0 # standard deviation of noise    
+    sigma_noise = 0.1 # standard deviation of noise    
     print ('Generating simulated data...')
     # X is observed data for each individual and each observation: shape (n_ppl, n_features, n_obs)
     # X0 is the first observation for each individual only: shape (n_ppl, n_features)
@@ -44,7 +44,7 @@ if __name__ == "__main__":
     print ('n_ppl {} n_fts {} n_iters {} step_size {} n_sinkhorn {} temperature_start {} temperature_end {} temperature_prior {} gumbel_scale {} n_mc_samples {} sigma_noise {}'.format(n_ppl, n_fts, n_iters, step_size, n_sinkhorn, temperature_start, temperature_end, temperature_prior, gumbel_scale, n_mc_samples, sigma_noise))
     
     # run model
-    print("Variational inference for matching...")
+    print("Training LEMING...")
     model = LEMING(X=X0,
                    labels=labels,
                    n_sinkhorn=n_sinkhorn,
@@ -58,5 +58,6 @@ if __name__ == "__main__":
                    use_em=True,
                    verbose=True)
     model.train()
-    model.plot_sequence(seq_true=seq_true, verbose=True)
+    S, S_samples = model.get_sequence(n_samples=10)
+    model.plot_sequence(S=S, S_samples=S_samples, seq_true=seq_true, verbose=True)
     plt.show()
