@@ -21,6 +21,7 @@ setup(name=               'leming',
                            'scipy==1.9',
                            'scikit-learn==1.3',
                            'torch==2.2',
+                           'joblib==1.5.3',
                            'matplotlib==3.7'],
       entry_points=	  {},
       zip_safe=		  False)

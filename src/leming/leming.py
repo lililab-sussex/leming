@@ -12,6 +12,7 @@ from pathlib import Path
 import pickle
 from joblib import Parallel, delayed, cpu_count
 from torch.utils.checkpoint import checkpoint
+import os
 
 def _fit_gmm_em_feature(X_i, y):
     y_i = y[~np.isnan(X_i)]
@@ -206,7 +207,11 @@ class LEMING(BaseEstimator):
             return -(distortion + rate)
             
     def train(self):
-        self.fit_gmms(self.X, self.labels)
+        try:
+            n_jobs = int(os.environ['SLURM_CPUS_PER_TASK'])
+        except:
+            n_jobs = -1
+        self.fit_gmms(self.X, self.labels, n_jobs=n_jobs)
         self.calc_prob_mat(self.X)
         optimizer = torch.optim.Adam(self.params, lr=self.step_size, eps=self.eps)
         gamma = (self.temperature_end / self.temperature_start) ** (1 / self.n_iters)        
