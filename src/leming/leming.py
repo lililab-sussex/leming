@@ -138,17 +138,33 @@ class LEMING(BaseEstimator):
     def sinkhorn_logspace(self, logP, n_iters=10):
         n = logP.size()[1]
         logP = logP.view(-1, n, n)
+        """
         for i in range(n_iters):
             logP = logP - (logsumexp(logP, dim=2, keepdim=True)).view(-1, n, 1)
             logP = logP - (logsumexp(logP, dim=1, keepdim=True)).view(-1, 1, n)
+        """
+        def sinkhorn_step(logP):
+            logP = logP - (logsumexp(logP, dim=2, keepdim=True)).view(-1, n, 1)
+            logP = logP - (logsumexp(logP, dim=1, keepdim=True)).view(-1, 1, n)
+            return logP
+        for i in range(n_iters):
+            logP = checkpoint(sinkhorn_step, logP, use_reentrant=False)
         return logP
 
     def vectorised_sinkhorn_logspace(self, logP, n_iters=20):
         n = logP.size()[1]
         logP = logP.view(n, n, -1)
+        """
         for i in range(n_iters):
             logP = logP - logsumexp(logP, dim=1, keepdim=True).view(n, 1, -1)
             logP = logP - logsumexp(logP, dim=0, keepdim=True).view(1, n, -1)
+        """
+        def sinkhorn_step(logP):
+            logP = logP - logsumexp(logP, dim=1, keepdim=True).view(n, 1, -1)
+            logP = logP - logsumexp(logP, dim=0, keepdim=True).view(1, n, -1)
+            return logP
+        for i in range(n_iters):
+            logP = checkpoint(sinkhorn_step, logP, use_reentrant=False)
         return logP
 
     def sample_gumbel(self, P, n=1):
@@ -196,11 +212,11 @@ class LEMING(BaseEstimator):
             loss.backward()
             optimizer.step()
 
-    def predict_stage(self, X, hard_perm=True):
+    def predict_stage(self, X, temperature=1., n_sinkhorn=20, hard_perm=True):
         self.calc_prob_mat(X)
         log_mu_P = self.params[0]
         # move \mu closer to Birkhoff polytope
-        log_P = self.sinkhorn_logspace(log_mu_P / self.temperature_end, self.n_sinkhorn)
+        log_P = self.sinkhorn_logspace(log_mu_P / temperature, n_sinkhorn)
         # note zero variance
         P = torch.exp(log_P)[0]
         k = self.prob_mat.shape[1]+1
@@ -224,7 +240,7 @@ class LEMING(BaseEstimator):
             logp_perm_k[:, -1] = logcp_yes[:, -1]
         else:
             # just use doubly-stochastic matrix directly
-            logp_perm_k = torch.zeros((self.prob_mat.shape[0], k), device=self.device)
+            logp_perm_k = torch.zeros((self.prob_mat.shape[0], k))
             p_yes = torch.einsum('ij,jk->ik', self.prob_mat[:, :, 1], P)
             p_yes[p_yes == 0] = self.eps
             p_no = torch.einsum('ij,jk->ik', self.prob_mat[:, :, 0], torch.flip(P, [1]))
@@ -294,9 +310,9 @@ class LEMING(BaseEstimator):
             S_point = np.einsum('i,ij->j', np.arange(n_feat), P_hard_sample)
             return S_point, np.array(S_point)
 
-    def plot_stages(self, stages):
+    def plot_stages(self, stages, bins=10):
         fig, ax = plt.subplots()
-        ax.hist(stages)
+        ax.hist(stages, bins=bins)
         ax.set_xlabel('Stage', fontsize=16)
         ax.set_ylabel('Count', fontsize=16)
 
