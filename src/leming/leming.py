@@ -225,22 +225,20 @@ class LEMING(BaseEstimator):
             loss.backward()
             optimizer.step()
 
-    def predict_stage(self, X, temperature=1E0, hard_perm=True):
+    def predict_stage(self, X, temperature=1., hard_perm=True):
+        #FIXME: currently only uses point estimate of sequence (zero Gumbel noise)
         self.calc_prob_mat(X)
         log_mu_P = self.params[0]
-        # point estimate of sequence (zero Gumbel noise)
-        # add to \mu and scale
-        log_P = (log_mu_P) / temperature
         # move \mu closer to Birkhoff polytope
-        log_P = self.sinkhorn_logspace(log_P, self.n_sinkhorn)
+        log_P = self.sinkhorn_logspace(log_P / temperature, self.n_sinkhorn)
         # note zero variance
-        P_soft = torch.exp(log_P)
+        P = torch.exp(log_P)
         k = self.prob_mat.shape[1]+1
-        prob_mat_np = self.prob_mat.detach().cpu().numpy()
         if hard_perm:
             # round to permutation matrices
-            P_soft = P_soft.detach().cpu().numpy()
-            P_hard = self.round_to_perm(P_soft[0])
+            prob_mat_np = self.prob_mat.detach().cpu().numpy()
+            P = P.detach().cpu().numpy()
+            P_hard = self.round_to_perm(P[0])
             S_hard = np.einsum('i,ij->j', np.arange(X.shape[1]), P_hard).astype(int)
             p_yes = np.array(prob_mat_np[:, S_hard, 1])
             p_yes[p_yes == 0] = self.eps
@@ -255,10 +253,22 @@ class LEMING(BaseEstimator):
             logp_perm_k[:, 1:-1] = np.flip(logcp_no[:, :-1], [1]) + logcp_yes[:, :-1]
             logp_perm_k[:, -1] = logcp_yes[:, -1]
         else:
-            #FIXME: implement soft staging and/or eigendecomposition instead of ML
-            raise ValueError('Not implemented')
-        stages = np.argmax(logp_perm_k, axis=1)
-        return stages
+            # just use doubly-stochastic matrix directly
+            logp_perm_k = torch.zeros((self.prob_mat.shape[0], k, P.shape[2]), device=self.device)
+            p_yes = torch.einsum('ij,jkl->ikl', self.prob_mat[:, :, 1], P)
+            p_yes[p_yes == 0] = self.eps
+            p_no = torch.einsum('ij,jkl->ikl', self.prob_mat[:, :, 0], torch.flip(P, [1]))
+            p_no[p_no == 0] = self.eps
+            logp_yes = torch.log(p_yes)
+            logp_no = torch.log(p_no)
+            logcp_yes = torch.cumsum(logp_yes, axis=1)
+            logcp_no = torch.cumsum(logp_no, axis=1)
+            logp_perm_k[:, 0, :] = logcp_no[:, -1, :]
+            logp_perm_k[:, 1:-1, :] = torch.flip(logcp_no[:, :-1, :], [1]) + logcp_yes[:, :-1, :]
+            logp_perm_k[:, -1, :] = logcp_yes[:, -1, :]            
+        stage_probs = torch.softmax(logp_perm_k, dim=1)
+        stages = np.argmax(stage_probs, axis=1)
+        return stages, stage_probs
 
     def perm_to_P(self, perm):
         K = len(perm)
@@ -294,10 +304,8 @@ class LEMING(BaseEstimator):
             for i in range(n_samples):
                 # sample Gumbel noise
                 gumbel_noise = self.to_var(self.sample_gumbel(log_mu_P.shape)[0])
-                # add to \mu and scale
-                log_P = (log_mu_P + gumbel_noise * self.gumbel_scale) / temperature
                 # move \mu closer to Birkhoff polytope
-                log_P = self.sinkhorn_logspace(log_P, self.n_sinkhorn)
+                log_P = self.sinkhorn_logspace((log_mu_P + gumbel_noise * self.gumbel_scale) / temperature, self.n_sinkhorn)
                 # note zero variance
                 P_sample = torch.exp(log_P)
                 P_sample = np.array([x.detach().cpu().numpy() for x in P_sample])
@@ -310,40 +318,39 @@ class LEMING(BaseEstimator):
             return S_mode, S_samples
         else:
             # point estimate of sequence (zero Gumbel noise)
-            # add to \mu and scale
-            log_P = (log_mu_P) / temperature
             # move \mu closer to Birkhoff polytope
-            log_P = self.sinkhorn_logspace(log_P, self.n_sinkhorn)
+            log_P = self.sinkhorn_logspace(log_P / temperature, self.n_sinkhorn)
             # note zero variance
             P_sample = torch.exp(log_P)
             P_sample = np.array([x.detach().cpu().numpy() for x in P_sample])
             # round to permutation matrices
             P_hard_sample = self.round_to_perm(P_sample[0])
             S_point = np.einsum('i,ij->j', np.arange(n_feat), P_hard_sample)
-            return S_point, np.array([])
+            return S_point, np.array(S_point)
 
-    def plot_sequence(self, S, S_samples, temperature=1E0, seq_true=[], verbose=False):
-        n_feat = len(S)
-        confusion_mat = np.zeros((n_feat, n_feat))
-        pcorr_vi, ncorr_vi = 0., 0
+    def confusion_soft(self, n_samples=100, gumbel_scale=0.01):
+        log_mu_P = self.params[0]
+        n_feat = log_mu_P.shape[0]
+        confusion = torch.zeros((n_feat, n_feat))
+        for i in range(n_samples):
+            gumbel_noise = self.to_var(self.sample_gumbel(log_mu_P.shape)[0])
+            log_P = (log_mu_P + gumbel_noise * gumbel_scale) / self.temperature
+            log_P = self.sinkhorn_logspace(log_P, self.n_sinkhorn)
+            confusion += torch.exp(log_P)[0]
+        confusion /= n_samples
+        return confusion
+
+    def confusion_hard(self, S, S_samples):
+        n_feat = log_mu_P.shape[0]
+        confusion = torch.zeros((n_feat, n_feat))
         for i in range(n_feat):
-            confusion_mat[i, :] = np.sum(S_samples == S[i], axis=0)
-            if len(seq_true)>0:
-                pcorr_vi += np.sum(S_samples == seq_true[i], axis=0)[i]/np.sum(S_samples == seq_true[i])
-                ncorr_vi += 1
-        if len(seq_true)>0:
-            kt_vi = sp.stats.kendalltau(seq_true.astype(int), S)
-            fcorr_vi = np.sum(S==seq_true)/n_feat
-            if ncorr_vi > 0:
-                pcorr_vi /= ncorr_vi
-            else:
-                pcorr_vi = np.nan
-            if verbose and len(seq_true)>0:
-                print ('S_true, S_vi, kt_vi', seq_true.astype(int), S, kt_vi)
-                print ('frac_correct', np.sum(S==seq_true)/n_feat, ' chance ', 1/n_feat)
-                print ('pcorr_vi', pcorr_vi)
+            confusion[i, :] = np.sum(S_samples == S[i], axis=0)
+        return confusion
+
+    def plot_confusion(self, confusion, S):
+        n_feat = len(S)
         fig, ax = plt.subplots(figsize=(8, 6))
-        ax.imshow(confusion_mat, interpolation='nearest', cmap='gray_r', label='Reco')
+        ax.imshow(confusion, interpolation='nearest', cmap='gray_r')
         ax.set_xticks(np.arange(n_feat))
         ax.set_yticks(np.arange(n_feat))
         ax.set_xticklabels(np.arange(n_feat), fontsize=20)
@@ -360,18 +367,8 @@ class LEMING(BaseEstimator):
             [l.set_visible(False) for (i,l) in enumerate(ax.yaxis.get_ticklabels()) if i % 100 != 0]
         ax.set_ylabel('Feature', fontsize=20, labelpad=10)
         ax.set_xlabel('Event', fontsize=20)
-        if len(seq_true)>0:
-            for i in range(n_feat):
-                if i==0:
-                    rect = plt.Rectangle((i-.5, np.where(S[i]==seq_true)[0][0]-.5), 1, 1, fill=True, color='black', linewidth=2, label='Reco')
-                    ax.add_patch(rect)
-                    rect = plt.Rectangle((i-.5, np.where(S[i]==seq_true)[0][0]-.5), 1, 1, fill=False, color='red', linewidth=2, label='True')
-                    ax.add_patch(rect)
-                else:
-                    rect = plt.Rectangle((i-.5, np.where(S[i]==seq_true)[0][0]-.5), 1, 1, fill=False, color='red', linewidth=2)
-                    ax.add_patch(rect)
-            ax.legend(fontsize=20)
         plt.subplots_adjust(bottom=0.15, top=0.95)
+        return fig, ax
 
     def plot_gmms(self, score_names=None, class_names=None):
         n_particp, n_biomarkers = self.X.shape
