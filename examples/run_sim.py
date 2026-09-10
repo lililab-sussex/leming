@@ -1,7 +1,8 @@
-# author: Peter Wijeratne (p.wijeratne@pm.me)
-# example LEMING training on simulated data
+# Author: Peter Wijeratne (p.wijeratne@sussex.ac.uk)
+# Example LEMING using simulated data
 import sys
 import numpy as np
+import scipy as sp
 import pickle
 import matplotlib.pyplot as plt
 from pathlib import Path
@@ -40,7 +41,7 @@ if __name__ == "__main__":
     # X0 is the first observation for each individual only: shape (n_ppl, n_features)
     # labels is the control ("con") or case ("case") labels: shape (n_ppl)
     # seq_true is the true simulated sequence, used for post-hoc comparison: shape (n_fts+1)
-    X, _, _, labels, X0, _, _, seq_true, _, _, _ = gen_data(n_ppl, n_fts, n_obs, sigma_noise)
+    X, _, _, labels, X0, stages_true, _, S_true, _, _, _ = gen_data(n_ppl, n_fts, n_obs, sigma_noise)
     print ('n_ppl {} n_fts {} n_iters {} step_size {} n_sinkhorn {} temperature_start {} temperature_end {} temperature_prior {} gumbel_scale {} n_mc_samples {} sigma_noise {}'.format(n_ppl, n_fts, n_iters, step_size, n_sinkhorn, temperature_start, temperature_end, temperature_prior, gumbel_scale, n_mc_samples, sigma_noise))
     
     # train model
@@ -58,6 +59,7 @@ if __name__ == "__main__":
                    use_em=True,
                    verbose=True)
     model.train()
+    model.plot_loss()
     
     # perform inference
     S, S_samples = model.get_sequence(n_samples=100)
@@ -65,10 +67,11 @@ if __name__ == "__main__":
     stages_hard, stage_probs_hard = model.predict_stage(X0, hard_perm=True)
     conf_soft = model.confusion_soft(n_samples=100, gumbel_scale=0.01)
     conf_hard = model.confusion_hard(S, S_samples)
-    
-    fig, ax = plt.subplots()
-    for i in range(len(stage_probs_soft)):
-        ax.hist(np.arange(len(S)+1), weights=stage_probs_soft[i])
+
+    # check against ground truth
+    print ('Soft staging accuracy', np.sum(stages_soft==stages_true)/len(X0))
+    print ('Hard staging accuracy', np.sum(stages_hard==stages_true)/len(X0))
+    print ('Sequence Kendall tau', sp.stats.kendalltau(S, S_true))
     
     # plot results
     model.plot_stages(stages_soft)

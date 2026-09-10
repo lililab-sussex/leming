@@ -184,27 +184,18 @@ class LEMING(BaseEstimator):
             - 0.5 * N**2 * np.log(2 * np.pi) \
             - 0.5 * N**2 * np.log(self.sigmasq_prior)
     """
-    def variational_objective(self, temperature, return_dr=False):
+    def variational_objective(self, temperature):
         log_mu_P = self.params[0]
         # vectorise \mu for number of MC samples
         log_mu_P_rep = log_mu_P.unsqueeze(2).repeat(1, 1, self.n_mc_samples)
         # sample Gumbel noise
         gumbel_noise = self.to_var(self.vectorised_sample_gumbel(log_mu_P.shape, self.n_mc_samples))
-        # add to \mu and scale
-        log_P = (log_mu_P_rep + gumbel_noise * self.gumbel_scale) / temperature
         # move \mu closer to Birkhoff polytope
-        log_P = self.vectorised_sinkhorn_logspace(log_P, self.n_sinkhorn)
-        # note zero variance
-        P = torch.exp(log_P)
-        # observation likelihood
-        distortion = self.to_var(self.vectorised_log_likelihood_ebm_logspace(P) / self.n_mc_samples)
-        # KL divergence
-        rate = self.to_var(self.gumbel_distance(log_mu_P, temperature))
-        # FIXME: entropy term for \mu?
-        if return_dr:
-            return -(distortion + rate), distortion, rate
-        else:
-            return -(distortion + rate)
+        P = torch.exp(self.vectorised_sinkhorn_logspace((log_mu_P_rep + gumbel_noise * self.gumbel_scale) / temperature, self.n_sinkhorn))
+        # observation likelihood + KL
+        elbo = self.to_var(self.vectorised_log_likelihood_ebm_logspace(P) / self.n_mc_samples) \
+            + self.to_var(self.gumbel_distance(log_mu_P, temperature))
+        return -elbo
             
     def train(self):
         try:
@@ -309,8 +300,9 @@ class LEMING(BaseEstimator):
                 # sequences
                 S_samples.append(np.einsum('i,ij->j', np.arange(n_feat), P_hard_sample))        
             S_unique, counts = np.unique(S_samples, axis=0, return_counts=True)
-            S_mode = S_unique[np.argmax(counts)].astype(int)
-            return S_mode, S_samples
+            #FIXME: change to consensus ordering
+            S_point = S_unique[np.argmax(counts)].astype(int) # mode
+            return S_point, S_samples
         else:
             # point estimate of sequence (zero Gumbel noise)
             # move \mu closer to Birkhoff polytope
@@ -370,6 +362,12 @@ class LEMING(BaseEstimator):
         ax.set_ylabel('Feature', fontsize=20, labelpad=10)
         ax.set_xlabel('Event', fontsize=20)
         plt.subplots_adjust(bottom=0.15, top=0.95)
+
+    def plot_loss(self):
+        fig, ax = plt.subplots()
+        ax.plot(np.arange(self.n_iters), [x.detach().numpy() for x in self.loss_trace])
+        ax.set_xlabel('Iteration', fontsize=16)
+        ax.set_ylabel('ELBO', fontsize=16)
 
     def write(self, path='model.pkl'):
         file_out = Path(path)
