@@ -43,7 +43,7 @@ if __name__ == "__main__":
     X, _, _, labels, X0, _, _, seq_true, _, _, _ = gen_data(n_ppl, n_fts, n_obs, sigma_noise)
     print ('n_ppl {} n_fts {} n_iters {} step_size {} n_sinkhorn {} temperature_start {} temperature_end {} temperature_prior {} gumbel_scale {} n_mc_samples {} sigma_noise {}'.format(n_ppl, n_fts, n_iters, step_size, n_sinkhorn, temperature_start, temperature_end, temperature_prior, gumbel_scale, n_mc_samples, sigma_noise))
     
-    # run model
+    # train model
     print("Training LEMING...")
     model = LEMING(X=X0,
                    labels=labels,
@@ -58,9 +58,17 @@ if __name__ == "__main__":
                    use_em=True,
                    verbose=True)
     model.train()
-    S, S_samples = model.get_sequence(n_samples=10)
-    conf_soft = model.confusion_soft()
-    fig, ax = model.plot_confusion(conf_soft, S)
+    
+    # perform inference
+    S, S_samples = model.get_sequence(n_samples=100)
+    stages_soft, stage_probs_soft = model.predict_stage(X0, hard_perm=False)
+    stages_hard, stage_probs_hard = model.predict_stage(X0, hard_perm=True)
+    conf_soft = model.confusion_soft(n_samples=100, gumbel_scale=0.01)
     conf_hard = model.confusion_hard(S, S_samples)
-    fig, ax = model.plot_confusion(conf_hard, S)
+    
+    # plot results
+    model.plot_stages(stages_soft)
+    model.plot_stages(stages_hard)
+    model.plot_confusion(conf_soft, S)
+    model.plot_confusion(conf_hard, S)
     plt.show()

@@ -225,12 +225,12 @@ class LEMING(BaseEstimator):
             loss.backward()
             optimizer.step()
 
-    def predict_stage(self, X, temperature=1., hard_perm=True):
+    def predict_stage(self, X, hard_perm=True):
         #FIXME: currently only uses point estimate of sequence (zero Gumbel noise)
         self.calc_prob_mat(X)
         log_mu_P = self.params[0]
         # move \mu closer to Birkhoff polytope
-        log_P = self.sinkhorn_logspace(log_P / temperature, self.n_sinkhorn)
+        log_P = self.sinkhorn_logspace(log_mu_P / self.temperature_end, self.n_sinkhorn)
         # note zero variance
         P = torch.exp(log_P)
         k = self.prob_mat.shape[1]+1
@@ -265,16 +265,11 @@ class LEMING(BaseEstimator):
             logcp_no = torch.cumsum(logp_no, axis=1)
             logp_perm_k[:, 0, :] = logcp_no[:, -1, :]
             logp_perm_k[:, 1:-1, :] = torch.flip(logcp_no[:, :-1, :], [1]) + logcp_yes[:, :-1, :]
-            logp_perm_k[:, -1, :] = logcp_yes[:, -1, :]            
-        stage_probs = torch.softmax(logp_perm_k, dim=1)
+            logp_perm_k[:, -1, :] = logcp_yes[:, -1, :]
+            logp_perm_k = logp_perm_k.detach().cpu().numpy()
+        stage_probs = sp.special.softmax(logp_perm_k, axis=1)
         stages = np.argmax(stage_probs, axis=1)
         return stages, stage_probs
-
-    def perm_to_P(self, perm):
-        K = len(perm)
-        P = np.zeros((K, K))
-        P[np.arange(K), perm] = 1
-        return P
 
     def round_to_perm(self, P):
         N = P.shape[0]
@@ -294,7 +289,7 @@ class LEMING(BaseEstimator):
             P_hard[:,:,i] = P_i
         return P_hard
 
-    def get_sequence(self, temperature=1E0, n_samples=0):
+    def get_sequence(self, n_samples=0):
         n_feat = self.X.shape[1]
         log_mu_P = self.params[0]
         if n_samples>0:
@@ -305,7 +300,7 @@ class LEMING(BaseEstimator):
                 # sample Gumbel noise
                 gumbel_noise = self.to_var(self.sample_gumbel(log_mu_P.shape)[0])
                 # move \mu closer to Birkhoff polytope
-                log_P = self.sinkhorn_logspace((log_mu_P + gumbel_noise * self.gumbel_scale) / temperature, self.n_sinkhorn)
+                log_P = self.sinkhorn_logspace((log_mu_P + gumbel_noise * self.gumbel_scale) / self.temperature_end, self.n_sinkhorn)
                 # note zero variance
                 P_sample = torch.exp(log_P)
                 P_sample = np.array([x.detach().cpu().numpy() for x in P_sample])
@@ -319,7 +314,7 @@ class LEMING(BaseEstimator):
         else:
             # point estimate of sequence (zero Gumbel noise)
             # move \mu closer to Birkhoff polytope
-            log_P = self.sinkhorn_logspace(log_P / temperature, self.n_sinkhorn)
+            log_P = self.sinkhorn_logspace(log_mu_P / self.temperature_end, self.n_sinkhorn)
             # note zero variance
             P_sample = torch.exp(log_P)
             P_sample = np.array([x.detach().cpu().numpy() for x in P_sample])
@@ -328,21 +323,28 @@ class LEMING(BaseEstimator):
             S_point = np.einsum('i,ij->j', np.arange(n_feat), P_hard_sample)
             return S_point, np.array(S_point)
 
+    def plot_stages(self, stages):
+        fig, ax = plt.subplots()
+        ax.hist(stages)
+        ax.set_xlabel('Stage', fontsize=16)
+        ax.set_ylabel('Count', fontsize=16)
+
     def confusion_soft(self, n_samples=100, gumbel_scale=0.01):
         log_mu_P = self.params[0]
         n_feat = log_mu_P.shape[0]
         confusion = torch.zeros((n_feat, n_feat))
         for i in range(n_samples):
             gumbel_noise = self.to_var(self.sample_gumbel(log_mu_P.shape)[0])
-            log_P = (log_mu_P + gumbel_noise * gumbel_scale) / self.temperature
+            log_P = (log_mu_P + gumbel_noise * gumbel_scale) / self.temperature_end
             log_P = self.sinkhorn_logspace(log_P, self.n_sinkhorn)
             confusion += torch.exp(log_P)[0]
         confusion /= n_samples
-        return confusion
+        return confusion.detach().numpy()
 
     def confusion_hard(self, S, S_samples):
+        log_mu_P = self.params[0]
         n_feat = log_mu_P.shape[0]
-        confusion = torch.zeros((n_feat, n_feat))
+        confusion = np.zeros((n_feat, n_feat))
         for i in range(n_feat):
             confusion[i, :] = np.sum(S_samples == S[i], axis=0)
         return confusion
@@ -368,36 +370,6 @@ class LEMING(BaseEstimator):
         ax.set_ylabel('Feature', fontsize=20, labelpad=10)
         ax.set_xlabel('Event', fontsize=20)
         plt.subplots_adjust(bottom=0.15, top=0.95)
-        return fig, ax
-
-    def plot_gmms(self, score_names=None, class_names=None):
-        n_particp, n_biomarkers = self.X.shape
-        if score_names is None:
-            score_names = ['BM{}'.format(x+1) for x in range(n_biomarkers)]
-        if class_names is None:
-            class_names = ['Control', 'Case']
-        n_x = np.round(np.sqrt(n_biomarkers)).astype(int)
-        n_y = np.ceil(np.sqrt(n_biomarkers)).astype(int)
-        fig, ax = plt.subplots(n_y, n_x, figsize=(12, 12))
-        for i in range(n_biomarkers):
-            bio_X = self.X[:, i]
-            bio_y = self.labels[~np.isnan(bio_X)]
-            bio_X = bio_X[~np.isnan(bio_X)]
-            hist_dat = [bio_X[bio_y == 0],
-                        bio_X[bio_y == 1]]
-            n_unique_values_bio_X = len(np.unique(bio_X))
-            leg1 = ax.flat[i].hist(hist_dat,
-                                   label=class_names,
-                                   density=True,
-                                   alpha=0.7,
-                                   stacked=True)
-            linspace = np.linspace(bio_X.min(), bio_X.max(), 100).reshape(-1, 1)
-            controls_score = sp.stats.norm.pdf(linspace, loc=self.thetas[i][0], scale=self.thetas[i][1]) * self.thetas[i][4]
-            patholog_score = sp.stats.norm.pdf(linspace, loc=self.thetas[i][2], scale=self.thetas[i][3]) * (1-self.thetas[i][4])
-            ax.flat[i].plot(linspace, controls_score)
-            ax.flat[i].plot(linspace, patholog_score)
-            ax.flat[i].set_title(score_names[i])
-            ax.flat[i].axes.get_yaxis().set_visible(False)
 
     def write(self, path='model.pkl'):
         file_out = Path(path)
