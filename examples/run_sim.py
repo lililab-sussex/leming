@@ -66,6 +66,10 @@ if __name__ == "__main__":
     conf_soft = model.confusion_soft(n_samples=100, gumbel_scale=0.01)
     conf_hard = model.confusion_hard(S, S_samples)
     
+    fig, ax = plt.subplots()
+    for i in range(len(stage_probs_soft)):
+        ax.hist(np.arange(len(S)+1), weights=stage_probs_soft[i])
+    
     # plot results
     model.plot_stages(stages_soft)
     model.plot_stages(stages_hard)

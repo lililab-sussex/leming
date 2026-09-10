@@ -232,13 +232,13 @@ class LEMING(BaseEstimator):
         # move \mu closer to Birkhoff polytope
         log_P = self.sinkhorn_logspace(log_mu_P / self.temperature_end, self.n_sinkhorn)
         # note zero variance
-        P = torch.exp(log_P)
+        P = torch.exp(log_P)[0]
         k = self.prob_mat.shape[1]+1
         if hard_perm:
             # round to permutation matrices
             prob_mat_np = self.prob_mat.detach().cpu().numpy()
             P = P.detach().cpu().numpy()
-            P_hard = self.round_to_perm(P[0])
+            P_hard = self.round_to_perm(P)
             S_hard = np.einsum('i,ij->j', np.arange(X.shape[1]), P_hard).astype(int)
             p_yes = np.array(prob_mat_np[:, S_hard, 1])
             p_yes[p_yes == 0] = self.eps
@@ -254,18 +254,18 @@ class LEMING(BaseEstimator):
             logp_perm_k[:, -1] = logcp_yes[:, -1]
         else:
             # just use doubly-stochastic matrix directly
-            logp_perm_k = torch.zeros((self.prob_mat.shape[0], k, P.shape[2]), device=self.device)
-            p_yes = torch.einsum('ij,jkl->ikl', self.prob_mat[:, :, 1], P)
+            logp_perm_k = torch.zeros((self.prob_mat.shape[0], k), device=self.device)
+            p_yes = torch.einsum('ij,jk->ik', self.prob_mat[:, :, 1], P)
             p_yes[p_yes == 0] = self.eps
-            p_no = torch.einsum('ij,jkl->ikl', self.prob_mat[:, :, 0], torch.flip(P, [1]))
+            p_no = torch.einsum('ij,jk->ik', self.prob_mat[:, :, 0], torch.flip(P, [1]))
             p_no[p_no == 0] = self.eps
             logp_yes = torch.log(p_yes)
             logp_no = torch.log(p_no)
             logcp_yes = torch.cumsum(logp_yes, axis=1)
             logcp_no = torch.cumsum(logp_no, axis=1)
-            logp_perm_k[:, 0, :] = logcp_no[:, -1, :]
-            logp_perm_k[:, 1:-1, :] = torch.flip(logcp_no[:, :-1, :], [1]) + logcp_yes[:, :-1, :]
-            logp_perm_k[:, -1, :] = logcp_yes[:, -1, :]
+            logp_perm_k[:, 0] = logcp_no[:, -1]
+            logp_perm_k[:, 1:-1] = torch.flip(logcp_no[:, :-1], [1]) + logcp_yes[:, :-1]
+            logp_perm_k[:, -1] = logcp_yes[:, -1]
             logp_perm_k = logp_perm_k.detach().cpu().numpy()
         stage_probs = sp.special.softmax(logp_perm_k, axis=1)
         stages = np.argmax(stage_probs, axis=1)
