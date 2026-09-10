@@ -59,7 +59,6 @@ class LEMING(BaseEstimator):
                  n_mc_samples=20,
                  n_iters=100,
                  step_size=1E-1,
-                 #                 sigmasq_prior=1.0,
                  use_em=True,
                  verbose=False):
         
@@ -76,8 +75,6 @@ class LEMING(BaseEstimator):
         self.n_iters = n_iters
         self.step_size = step_size
         self.use_em = use_em
-        #FIXME: not currently used
-        #        self.sigmasq_prior = sigmasq_prior
         self.verbose = verbose
         
         # automatically-defined variables
@@ -121,9 +118,8 @@ class LEMING(BaseEstimator):
         self.prob_mat = self.to_var(torch.tensor(prob_mat, dtype=self.dtype))
 
     def vectorised_log_likelihood_ebm_logspace(self, P):
-        k = self.prob_mat.shape[1]+1
         # note we omit the uniform prior over k
-        #        logp_k = torch.log(torch.tensor(1/k))
+        k = self.prob_mat.shape[1]+1
         logp_perm_k = torch.zeros((self.prob_mat.shape[0], k, P.shape[2]), device=self.device)
         p_yes = torch.einsum('ij,jkl->ikl', self.prob_mat[:, :, 1], P)
         p_yes[p_yes == 0] = self.eps
@@ -147,16 +143,12 @@ class LEMING(BaseEstimator):
             logP = logP - (logsumexp(logP, dim=1, keepdim=True)).view(-1, 1, n)
         return logP
 
-    def vectorised_sinkhorn_logspace(self, logP, n_iters=10):
+    def vectorised_sinkhorn_logspace(self, logP, n_iters=20):
         n = logP.size()[1]
         logP = logP.view(n, n, -1)
-        def sinkhorn_step(logP):
+        for i in range(n_iters):
             logP = logP - logsumexp(logP, dim=1, keepdim=True).view(n, 1, -1)
             logP = logP - logsumexp(logP, dim=0, keepdim=True).view(1, n, -1)
-            return logP
-        # do this to reduce memory load when running multiple MC samples
-        for i in range(n_iters):
-            logP = checkpoint(sinkhorn_step, logP, use_reentrant=False)
         return logP
 
     def sample_gumbel(self, P, n=1):
@@ -173,30 +165,18 @@ class LEMING(BaseEstimator):
                         torch.exp(gammaln(1 + self.temperature_prior / temperature) - log_mu_P * self.temperature_prior / temperature)
                         - (np.log(temperature) - 1 - 0.5772156649))
         return arr
-    """
-    #FIXME: not currently used in ELBO
-    def unconstrained_log_prior(self, P):
-        N = P.shape[0]
-        assert P.shape == (N, N)
-        corners = np.array([0, 1])
-        diffs = P[:,:,None] - corners[None, None, :]
-        return np.sum(logsumexp(-0.5 * diffs ** 2 / self.sigmasq_prior, axis=2)) \
-            - 0.5 * N**2 * np.log(2 * np.pi) \
-            - 0.5 * N**2 * np.log(self.sigmasq_prior)
-    """
+
     def variational_objective(self, temperature):
         log_mu_P = self.params[0]
-        # vectorise \mu for number of MC samples
-        log_mu_P_rep = log_mu_P.unsqueeze(2).repeat(1, 1, self.n_mc_samples)
         # sample Gumbel noise
         gumbel_noise = self.to_var(self.vectorised_sample_gumbel(log_mu_P.shape, self.n_mc_samples))
         # move \mu closer to Birkhoff polytope
-        P = torch.exp(self.vectorised_sinkhorn_logspace((log_mu_P_rep + gumbel_noise * self.gumbel_scale) / temperature, self.n_sinkhorn))
+        P = torch.exp(self.vectorised_sinkhorn_logspace((log_mu_P.unsqueeze(2) + gumbel_noise * self.gumbel_scale) / temperature, self.n_sinkhorn))
         # observation likelihood + KL
         elbo = self.to_var(self.vectorised_log_likelihood_ebm_logspace(P) / self.n_mc_samples) \
             + self.to_var(self.gumbel_distance(log_mu_P, temperature))
         return -elbo
-            
+    
     def train(self):
         try:
             n_jobs = int(os.environ['SLURM_CPUS_PER_TASK'])
@@ -217,7 +197,6 @@ class LEMING(BaseEstimator):
             optimizer.step()
 
     def predict_stage(self, X, hard_perm=True):
-        #FIXME: currently only uses point estimate of sequence (zero Gumbel noise)
         self.calc_prob_mat(X)
         log_mu_P = self.params[0]
         # move \mu closer to Birkhoff polytope
