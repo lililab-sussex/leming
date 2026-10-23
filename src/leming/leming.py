@@ -228,7 +228,8 @@ class LEMING(BaseEstimator):
             S_hard = np.einsum('i,ij->j', np.arange(X.shape[1]), P_hard).astype(int)
             p_yes = np.array(prob_mat_np[:, S_hard, 1])
             p_yes[p_yes == 0] = self.eps
-            p_no = np.array(prob_mat_np[:, S_hard, 0])
+            # Reverse before cumsum so stage k uses the remaining normal events.
+            p_no = np.array(prob_mat_np[:, S_hard[::-1], 0])
             p_no[p_no == 0] = self.eps
             logp_yes = np.log(p_yes)
             logp_no = np.log(p_no)
